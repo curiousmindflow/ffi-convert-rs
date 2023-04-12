@@ -224,6 +224,87 @@ fn is_primitive(id: TypeId) -> bool {
         || id == TypeId::of::<f64>()
 }
 
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct CSequence<T> {
+    data_ptr: *const T,
+    size: usize,
+    // capacity: usize
+}
+
+impl<U: AsRust<V> + 'static, V: Clone> AsRust<Vec<V>> for CSequence<U> {
+    fn as_rust(&self) -> Result<Vec<V>, AsRustError> {
+        let mut vec = Vec::with_capacity(self.size);
+
+        if self.size > 0 {
+            let values =
+                unsafe { std::slice::from_raw_parts_mut(self.data_ptr as *mut U, self.size) };
+
+            if is_primitive(TypeId::of::<U>()) {
+                unsafe {
+                    ptr::copy(
+                        values.as_ptr() as *const V,
+                        vec.as_mut_ptr() as *mut V,
+                        self.size,
+                    );
+                    vec.set_len(self.size);
+                }
+            } else {
+                for value in values {
+                    vec.push(value.as_rust()?);
+                }
+            }
+        }
+        Ok(vec)
+    }
+}
+
+impl<U: CReprOf<V> + CDrop, V: Clone + 'static> CReprOf<Vec<V>> for CSequence<U> {
+    fn c_repr_of(input: Vec<V>) -> Result<Self, CReprOfError> {
+        let input_size = input.len();
+        let mut output: CSequence<U> = CSequence {
+            data_ptr: ptr::null(),
+            size: input_size,
+        };
+
+        if input_size > 0 {
+            if is_primitive(TypeId::of::<V>()) {
+                output.data_ptr = Box::into_raw(input.into_boxed_slice()) as *const U;
+            } else {
+                output.data_ptr = Box::into_raw(
+                    input
+                        .into_iter()
+                        .map(U::c_repr_of)
+                        .collect::<Result<Vec<_>, CReprOfError>>()
+                        .expect("Could not convert to C representation")
+                        .into_boxed_slice(),
+                ) as *const U;
+            }
+        } else {
+            output.data_ptr = ptr::null() as *const U;
+        }
+        Ok(output)
+    }
+}
+
+impl<T> CDrop for CSequence<T> {
+    fn do_drop(&mut self) -> Result<(), CDropError> {
+        let _ = unsafe {
+            Box::from_raw(std::slice::from_raw_parts_mut(
+                self.data_ptr as *mut T,
+                self.size,
+            ))
+        };
+        Ok(())
+    }
+}
+
+impl<T> Drop for CSequence<T> {
+    fn drop(&mut self) {
+        let _ = self.do_drop();
+    }
+}
+
 /// A utility type to represent range.
 /// Note that the parametrized type T should have have `CReprOf` and `AsRust` trait implementated.
 ///
